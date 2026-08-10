@@ -259,10 +259,23 @@ def offset_contour_inward(contour: List[Tuple[float, float]], offset: float) -> 
     return new_pts
 
 def reverse_contour(contour: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    """Inverse le sens du contour (pour passer en avalant)"""
-    if len(contour) < 2:
+    """Inverse correctement le sens d'un contour fermé"""
+    if len(contour) < 3:
         return contour
-    return contour[-2::-1] + [contour[0]]
+
+    # On enlève le point de fermeture s'il existe
+    if contour[0] == contour[-1]:
+        pts = contour[:-1]
+    else:
+        pts = contour[:]
+
+    # Inversion
+    reversed_pts = pts[::-1]
+
+    # On referme le contour
+    reversed_pts.append(reversed_pts[0])
+
+    return reversed_pts
 
 # ====================== POLICE BÂTON ======================
 DIGIT_STROKES = {
