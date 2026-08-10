@@ -5,6 +5,7 @@ Générateur de G-code Tetris bois
 - Découpe avec offset
 - Vcarve avec offset
 - Gravure des numéros de pièces
+- Choix avalant / opposition
 
 Usage :
     python generate_tetris_gcode.py 8x12:4
@@ -23,8 +24,8 @@ WIDTH_MODULES = 8
 HEIGHT_MODULES = 12
 MAX_SIZE = 4
 
-THICKNESS = 6.0
-PASS_DEPTH = 1.0
+THICKNESS = 3.5
+PASS_DEPTH = 0.5
 SAFE_Z = 5.0
 FEED_RATE = 1000
 PLUNGE_RATE = 100
@@ -35,10 +36,14 @@ OFFSET = 0.5
 VCARVE_OFFSET = 1.0
 VCARVE_DEPTH = -1.0
 
+# Direction d'usinage
+CLIMB_MILLING = False   # False = Opposition (sens trigonométrique)
+                        # True  = Avalant (sens horaire)
+
 # Paramètres de gravure des numéros
-ENGRAVE_DEPTH = -0.5          # Profondeur de gravure
-ENGRAVE_HEIGHT = 3.0          # Hauteur des chiffres (mm)
-ENGRAVE_FEED = 600            # Vitesse de gravure
+ENGRAVE_DEPTH = -0.5
+ENGRAVE_HEIGHT = 3.0
+ENGRAVE_FEED = 600
 # ========================================================
 
 Grid = List[List[int]]
@@ -113,7 +118,6 @@ def try_fill_greedy(max_attempts_per_cell: int = 150) -> Tuple[Grid, Dict[int, L
 
             placed = False
 
-            # Essai normal MIN_SIZE → MAX_SIZE
             if max_possible >= MIN_SIZE:
                 for _ in range(max_attempts_per_cell):
                     size = random.randint(MIN_SIZE, max_possible)
@@ -254,10 +258,13 @@ def offset_contour_inward(contour: List[Tuple[float, float]], offset: float) -> 
         new_pts.append(new_pts[0])
     return new_pts
 
-# ====================== POLICE BÂTON SIMPLE ======================
-# Chaque chiffre est défini par une liste de segments (x1,y1,x2,y2)
-# dans un repère 0→1 (largeur) et 0→1 (hauteur)
+def reverse_contour(contour: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Inverse le sens du contour (pour passer en avalant)"""
+    if len(contour) < 2:
+        return contour
+    return contour[-2::-1] + [contour[0]]
 
+# ====================== POLICE BÂTON ======================
 DIGIT_STROKES = {
     '0': [(0.2,0.1, 0.8,0.1), (0.8,0.1, 0.8,0.9), (0.8,0.9, 0.2,0.9), (0.2,0.9, 0.2,0.1)],
     '1': [(0.5,0.1, 0.5,0.9), (0.3,0.75, 0.5,0.9)],
@@ -272,20 +279,18 @@ DIGIT_STROKES = {
 }
 
 def get_number_strokes(number: int, height: float) -> List[List[Tuple[float, float]]]:
-    """Retourne la liste des polylignes pour un nombre (plusieurs chiffres possibles)"""
     text = str(number)
     digit_width = height * 0.7
     spacing = height * 0.15
     total_width = len(text) * digit_width + (len(text) - 1) * spacing
 
     strokes = []
-    x_offset = -total_width / 2  # centré
+    x_offset = -total_width / 2
 
     for char in text:
         if char not in DIGIT_STROKES:
             continue
         for x1, y1, x2, y2 in DIGIT_STROKES[char]:
-            # Mise à l'échelle et positionnement
             px1 = x_offset + x1 * digit_width
             py1 = y1 * height
             px2 = x_offset + x2 * digit_width
@@ -311,10 +316,14 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
             cut_contour = offset_contour_inward(raw, OFFSET)
             vcarve_contour = offset_contour_inward(raw, VCARVE_OFFSET)
 
+            # Application du sens d'usinage
+            if CLIMB_MILLING:
+                cut_contour = reverse_contour(cut_contour)
+                vcarve_contour = reverse_contour(vcarve_contour)
+
             contours_cut[pid] = cut_contour
             contours_vcarve[pid] = vcarve_contour
 
-            # Collecte des coordonnées pour le bounding box
             for x, y in cut_contour:
                 all_x.append(x)
                 all_y.append(y)
@@ -330,7 +339,6 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
         all_x.append(cx)
         all_y.append(cy)
 
-    # Calcul du bounding box global
     xmin = min(all_x) if all_x else 0
     xmax = max(all_x) if all_x else 0
     ymin = min(all_y) if all_y else 0
@@ -341,6 +349,8 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
     z_min_engrave = ENGRAVE_DEPTH
     z_max = SAFE_Z
 
+    mode_str = "Avalant (climb)" if CLIMB_MILLING else "Opposition (conventional)"
+
     # ========== 1. Découpe ==========
     cut_filename = f"{base_filename}.nc"
     with open(cut_filename, "w", encoding="utf-8") as f:
@@ -348,6 +358,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
         f.write("; G-code Tetris bois - Découpe\n")
         f.write(f"; {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}\n")
         f.write(f"; Offset = {OFFSET} mm\n")
+        f.write(f"; Mode = {mode_str}\n")
         f.write(f"; Xmin = {xmin:.3f} | Xmax = {xmax:.3f}\n")
         f.write(f"; Ymin = {ymin:.3f} | Ymax = {ymax:.3f}\n")
         f.write(f"; Zmin = {z_min_cut:.3f} | Zmax = {z_max:.3f}\n")
@@ -380,6 +391,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
         f.write("; G-code Tetris bois - Vcarve\n")
         f.write(f"; {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}\n")
         f.write(f"; Offset Vcarve = {VCARVE_OFFSET} mm\n")
+        f.write(f"; Mode = {mode_str}\n")
         f.write(f"; Xmin = {xmin:.3f} | Xmax = {xmax:.3f}\n")
         f.write(f"; Ymin = {ymin:.3f} | Ymax = {ymax:.3f}\n")
         f.write(f"; Zmin = {z_min_vcarve:.3f} | Zmax = {z_max:.3f}\n")
@@ -420,17 +432,46 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
             cx, cy = engrave_positions[pid]
             strokes = get_number_strokes(pid, ENGRAVE_HEIGHT)
 
-            f.write(f"; Numéro {pid}\n")
+            f.write(f"; ---------- Numéro {pid} ----------\n")
+
+            if not strokes:
+                continue
+
+            first = True
+            last_end = None
+
             for stroke in strokes:
                 x1, y1 = stroke[0]
                 x2, y2 = stroke[1]
-                f.write(f"G0 X{cx + x1:.3f} Y{cy + y1:.3f}\n")
-                f.write(f"G1 Z{ENGRAVE_DEPTH:.3f} F{PLUNGE_RATE}\n")
-                f.write(f"G1 X{cx + x2:.3f} Y{cy + y2:.3f} F{ENGRAVE_FEED}\n")
-                f.write(f"G0 Z{SAFE_Z:.3f}\n")
-            f.write("\n")
+
+                abs_x1 = cx + x1
+                abs_y1 = cy + y1
+                abs_x2 = cx + x2
+                abs_y2 = cy + y2
+
+                need_retract = True
+                if last_end is not None:
+                    dist = math.hypot(abs_x1 - last_end[0], abs_y1 - last_end[1])
+                    if dist < 0.3:
+                        need_retract = False
+
+                if need_retract:
+                    if not first:
+                        f.write(f"G0 Z{SAFE_Z:.3f}\n")
+                    f.write(f"G0 X{abs_x1:.3f} Y{abs_y1:.3f}\n")
+                    f.write(f"G1 Z{ENGRAVE_DEPTH:.3f} F{PLUNGE_RATE}\n")
+                else:
+                    f.write(f"G1 X{abs_x1:.3f} Y{abs_y1:.3f} F{ENGRAVE_FEED}\n")
+
+                f.write(f"G1 X{abs_x2:.3f} Y{abs_y2:.3f} F{ENGRAVE_FEED}\n")
+
+                last_end = (abs_x2, abs_y2)
+                first = False
+
+            f.write(f"G0 Z{SAFE_Z:.3f}\n\n")
 
         f.write("M5\nG0 Z10\nG0 X0 Y0\nM30\n")
+
     print(f"✅ Numéros     : {engrave_filename}")
 
 if __name__ == "__main__":
@@ -450,6 +491,8 @@ if __name__ == "__main__":
             sys.exit(1)
 
     print(f"Paramètres : {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}")
+    print(f"Mode d'usinage : {'Avalant (climb)' if CLIMB_MILLING else 'Opposition (conventional)'}")
+
     random.seed()
     grid, pieces = try_fill_greedy()
 
