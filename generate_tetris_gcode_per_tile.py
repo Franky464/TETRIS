@@ -2,21 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 Générateur de G-code Tetris bois
-- Découpe avec offset
-- Vcarve avec offset
-- Gravure des numéros de pièces
-- Choix avalant / opposition
+- Découpe + Vcarve + Gravure des numéros
+- Réduction des doublons de formes
+- Choix Avalant / Opposition
 
 Usage :
     python generate_tetris_gcode.py 8x12:4
-    python generate_tetris_gcode.py 12x16:6
+    python generate_tetris_gcode.py 10x15:6
 """
 
 import random
 import math
 import sys
 from typing import List, Tuple, Dict, Optional
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # ====================== PARAMÈTRES ======================
 MODULE = 12.0
@@ -37,10 +36,9 @@ VCARVE_OFFSET = 1.0
 VCARVE_DEPTH = -1.0
 
 # Direction d'usinage
-CLIMB_MILLING = False   # False = Opposition (sens trigonométrique)
-                        # True  = Avalant (sens horaire)
+CLIMB_MILLING = False   # False = Opposition | True = Avalant
 
-# Paramètres de gravure des numéros
+# Gravure des numéros
 ENGRAVE_DEPTH = -0.5
 ENGRAVE_HEIGHT = 3.0
 ENGRAVE_FEED = 600
@@ -95,16 +93,34 @@ def generate_polyomino_in_free_space(grid: Grid, start: Tuple[int, int], size: i
     origin = (min_x, min_y)
     return shape, origin
 
-def try_fill_greedy(max_attempts_per_cell: int = 150) -> Tuple[Grid, Dict[int, List[Tuple[int, int]]]]:
+def normalize_shape(shape: List[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
+    """Retourne une version canonique de la forme (toutes rotations)"""
+    def get_rotations(s):
+        rotations = []
+        current = list(s)
+        for _ in range(4):
+            minx = min(p[0] for p in current)
+            miny = min(p[1] for p in current)
+            normalized = tuple(sorted((x - minx, y - miny) for x, y in current))
+            rotations.append(normalized)
+            # Rotation 90° horaire
+            current = [(y, -x) for x, y in current]
+        return rotations
+
+    all_rots = get_rotations(shape)
+    return min(all_rots)
+
+def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, List[Tuple[int, int]]]]:
     w, h = WIDTH_MODULES, HEIGHT_MODULES
     total = w * h
 
-    for global_try in range(1, 100):
+    for global_try in range(1, 120):
         print(f"=== Essai global {global_try} ===")
         grid = create_empty_grid(w, h)
         pieces = {}
         pid = 1
         cells_filled = 0
+        shape_usage = Counter()
 
         while cells_filled < total:
             pos = find_next_empty(grid)
@@ -117,6 +133,8 @@ def try_fill_greedy(max_attempts_per_cell: int = 150) -> Tuple[Grid, Dict[int, L
                 break
 
             placed = False
+            best_candidate = None
+            best_score = float('inf')
 
             if max_possible >= MIN_SIZE:
                 for _ in range(max_attempts_per_cell):
@@ -124,14 +142,29 @@ def try_fill_greedy(max_attempts_per_cell: int = 150) -> Tuple[Grid, Dict[int, L
                     result = generate_polyomino_in_free_space(grid, pos, size)
                     if result is None:
                         continue
+
                     shape, (ox, oy) = result
-                    if can_place(grid, shape, ox, oy):
-                        place(grid, shape, ox, oy, pid)
-                        pieces[pid] = [(ox + dx, oy + dy) for dx, dy in shape]
-                        cells_filled += size
-                        pid += 1
-                        placed = True
+                    if not can_place(grid, shape, ox, oy):
+                        continue
+
+                    norm = normalize_shape(shape)
+                    score = shape_usage[norm]
+
+                    if score < best_score:
+                        best_score = score
+                        best_candidate = (shape, ox, oy, size, norm)
+
+                    if score == 0:  # Forme jamais vue → on prend
                         break
+
+            if best_candidate is not None:
+                shape, ox, oy, size, norm = best_candidate
+                place(grid, shape, ox, oy, pid)
+                pieces[pid] = [(ox + dx, oy + dy) for dx, dy in shape]
+                shape_usage[norm] += 1
+                cells_filled += size
+                pid += 1
+                placed = True
 
             # Dernier recours : pièce de 1 module
             if not placed:
@@ -148,6 +181,9 @@ def try_fill_greedy(max_attempts_per_cell: int = 150) -> Tuple[Grid, Dict[int, L
 
         if cells_filled == total:
             print(f"✅ Succès en essai {global_try} — {len(pieces)} pièces")
+            unique = len(shape_usage)
+            duplicates = sum(1 for v in shape_usage.values() if v > 1)
+            print(f"   Formes uniques : {unique} | Formes en double ou plus : {duplicates}")
             return grid, pieces
 
     raise RuntimeError("Impossible de remplir la grille.")
@@ -259,22 +295,14 @@ def offset_contour_inward(contour: List[Tuple[float, float]], offset: float) -> 
     return new_pts
 
 def reverse_contour(contour: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    """Inverse correctement le sens d'un contour fermé"""
     if len(contour) < 3:
         return contour
-
-    # On enlève le point de fermeture s'il existe
     if contour[0] == contour[-1]:
         pts = contour[:-1]
     else:
         pts = contour[:]
-
-    # Inversion
     reversed_pts = pts[::-1]
-
-    # On referme le contour
     reversed_pts.append(reversed_pts[0])
-
     return reversed_pts
 
 # ====================== POLICE BÂTON ======================
@@ -310,7 +338,6 @@ def get_number_strokes(number: int, height: float) -> List[List[Tuple[float, flo
             py2 = y2 * height
             strokes.append([(px1, py1), (px2, py2)])
         x_offset += digit_width + spacing
-
     return strokes
 
 def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str):
@@ -319,9 +346,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
     contours_cut = {}
     contours_vcarve = {}
     engrave_positions = {}
-
-    all_x = []
-    all_y = []
+    all_x, all_y = [], []
 
     for pid, cells in pieces.items():
         raw = get_perfect_contour(cells)
@@ -329,7 +354,6 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
             cut_contour = offset_contour_inward(raw, OFFSET)
             vcarve_contour = offset_contour_inward(raw, VCARVE_OFFSET)
 
-            # Application du sens d'usinage
             if CLIMB_MILLING:
                 cut_contour = reverse_contour(cut_contour)
                 vcarve_contour = reverse_contour(vcarve_contour)
@@ -337,14 +361,10 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
             contours_cut[pid] = cut_contour
             contours_vcarve[pid] = vcarve_contour
 
-            for x, y in cut_contour:
-                all_x.append(x)
-                all_y.append(y)
-            for x, y in vcarve_contour:
+            for x, y in cut_contour + vcarve_contour:
                 all_x.append(x)
                 all_y.append(y)
 
-        # Position de gravure (case bas-droite)
         best = max(cells, key=lambda c: (c[0], -c[1]))
         cx = (best[0] + 0.5) * MODULE
         cy = (best[1] + 0.5) * MODULE
@@ -357,34 +377,24 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
     ymin = min(all_y) if all_y else 0
     ymax = max(all_y) if all_y else 0
 
-    z_min_cut = -THICKNESS
-    z_min_vcarve = VCARVE_DEPTH
-    z_min_engrave = ENGRAVE_DEPTH
-    z_max = SAFE_Z
-
     mode_str = "Avalant (climb)" if CLIMB_MILLING else "Opposition (conventional)"
 
-    # ========== 1. Découpe ==========
-    cut_filename = f"{base_filename}.nc"
-    with open(cut_filename, "w", encoding="utf-8") as f:
+    # ----- 1. Découpe -----
+    with open(f"{base_filename}.nc", "w", encoding="utf-8") as f:
         f.write("; =============================================\n")
         f.write("; G-code Tetris bois - Découpe\n")
         f.write(f"; {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}\n")
-        f.write(f"; Offset = {OFFSET} mm\n")
-        f.write(f"; Mode = {mode_str}\n")
-        f.write(f"; Xmin = {xmin:.3f} | Xmax = {xmax:.3f}\n")
-        f.write(f"; Ymin = {ymin:.3f} | Ymax = {ymax:.3f}\n")
-        f.write(f"; Zmin = {z_min_cut:.3f} | Zmax = {z_max:.3f}\n")
+        f.write(f"; Offset = {OFFSET} mm | Mode = {mode_str}\n")
+        f.write(f"; Xmin={xmin:.3f} Xmax={xmax:.3f} Ymin={ymin:.3f} Ymax={ymax:.3f}\n")
+        f.write(f"; Zmin={-THICKNESS:.3f} Zmax={SAFE_Z:.3f}\n")
         f.write("; =============================================\n\n")
         f.write("G21\nG90\nG94\n")
-        f.write(f"G0 Z{SAFE_Z:.3f}\n")
-        f.write(f"M3 S{SPINDLE_SPEED}\n")
-        f.write("G0 X0 Y0\n\n")
+        f.write(f"G0 Z{SAFE_Z:.3f}\nM3 S{SPINDLE_SPEED}\nG0 X0 Y0\n\n")
 
         for p in range(1, num_passes + 1):
             z = -min(p * PASS_DEPTH, THICKNESS)
             f.write(f"; === PASSE {p}/{num_passes} Z={z:.3f} ===\n")
-            for pid in sorted(contours_cut.keys()):
+            for pid in sorted(contours_cut):
                 contour = contours_cut[pid]
                 f.write(f"; Pièce {pid}\n")
                 f.write(f"G0 X{contour[0][0]:.3f} Y{contour[0][1]:.3f}\n")
@@ -393,28 +403,20 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
                     f.write(f"G1 X{x:.3f} Y{y:.3f} F{FEED_RATE}\n")
                 f.write(f"G0 Z{SAFE_Z:.3f}\n")
             f.write("\n")
-
         f.write("M5\nG0 Z10\nG0 X0 Y0\nM30\n")
-    print(f"✅ Découpe     : {cut_filename}")
+    print(f"✅ Découpe     : {base_filename}.nc")
 
-    # ========== 2. Vcarve ==========
-    vcarve_filename = f"{base_filename}_vcarve.nc"
-    with open(vcarve_filename, "w", encoding="utf-8") as f:
+    # ----- 2. Vcarve -----
+    with open(f"{base_filename}_vcarve.nc", "w", encoding="utf-8") as f:
         f.write("; =============================================\n")
         f.write("; G-code Tetris bois - Vcarve\n")
-        f.write(f"; {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}\n")
-        f.write(f"; Offset Vcarve = {VCARVE_OFFSET} mm\n")
-        f.write(f"; Mode = {mode_str}\n")
-        f.write(f"; Xmin = {xmin:.3f} | Xmax = {xmax:.3f}\n")
-        f.write(f"; Ymin = {ymin:.3f} | Ymax = {ymax:.3f}\n")
-        f.write(f"; Zmin = {z_min_vcarve:.3f} | Zmax = {z_max:.3f}\n")
+        f.write(f"; Offset Vcarve = {VCARVE_OFFSET} mm | Mode = {mode_str}\n")
+        f.write(f"; Xmin={xmin:.3f} Xmax={xmax:.3f} Ymin={ymin:.3f} Ymax={ymax:.3f}\n")
         f.write("; =============================================\n\n")
         f.write("G21\nG90\nG94\n")
-        f.write(f"G0 Z{SAFE_Z:.3f}\n")
-        f.write(f"M3 S{SPINDLE_SPEED}\n")
-        f.write("G0 X0 Y0\n\n")
+        f.write(f"G0 Z{SAFE_Z:.3f}\nM3 S{SPINDLE_SPEED}\nG0 X0 Y0\n\n")
 
-        for pid in sorted(contours_vcarve.keys()):
+        for pid in sorted(contours_vcarve):
             contour = contours_vcarve[pid]
             f.write(f"; Pièce {pid}\n")
             f.write(f"G0 X{contour[0][0]:.3f} Y{contour[0][1]:.3f}\n")
@@ -422,50 +424,34 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
             for x, y in contour[1:]:
                 f.write(f"G1 X{x:.3f} Y{y:.3f} F{FEED_RATE}\n")
             f.write(f"G0 Z{SAFE_Z:.3f}\n")
-
         f.write("\nM5\nG0 Z10\nG0 X0 Y0\nM30\n")
-    print(f"✅ Vcarve      : {vcarve_filename}")
+    print(f"✅ Vcarve      : {base_filename}_vcarve.nc")
 
-    # ========== 3. Gravure des numéros ==========
-    engrave_filename = f"{base_filename}_numbers.nc"
-    with open(engrave_filename, "w", encoding="utf-8") as f:
+    # ----- 3. Numéros -----
+    with open(f"{base_filename}_numbers.nc", "w", encoding="utf-8") as f:
         f.write("; =============================================\n")
         f.write("; G-code Tetris bois - Gravure des numéros\n")
-        f.write(f"; Hauteur = {ENGRAVE_HEIGHT} mm | Profondeur = {ENGRAVE_DEPTH} mm\n")
-        f.write(f"; Xmin = {xmin:.3f} | Xmax = {xmax:.3f}\n")
-        f.write(f"; Ymin = {ymin:.3f} | Ymax = {ymax:.3f}\n")
-        f.write(f"; Zmin = {z_min_engrave:.3f} | Zmax = {z_max:.3f}\n")
+        f.write(f"; Hauteur={ENGRAVE_HEIGHT}mm | Profondeur={ENGRAVE_DEPTH}mm\n")
         f.write("; =============================================\n\n")
         f.write("G21\nG90\nG94\n")
-        f.write(f"G0 Z{SAFE_Z:.3f}\n")
-        f.write(f"M3 S{SPINDLE_SPEED}\n")
-        f.write("G0 X0 Y0\n\n")
+        f.write(f"G0 Z{SAFE_Z:.3f}\nM3 S{SPINDLE_SPEED}\nG0 X0 Y0\n\n")
 
-        for pid in sorted(engrave_positions.keys()):
+        for pid in sorted(engrave_positions):
             cx, cy = engrave_positions[pid]
             strokes = get_number_strokes(pid, ENGRAVE_HEIGHT)
-
             f.write(f"; ---------- Numéro {pid} ----------\n")
-
-            if not strokes:
-                continue
 
             first = True
             last_end = None
-
             for stroke in strokes:
                 x1, y1 = stroke[0]
                 x2, y2 = stroke[1]
-
-                abs_x1 = cx + x1
-                abs_y1 = cy + y1
-                abs_x2 = cx + x2
-                abs_y2 = cy + y2
+                abs_x1, abs_y1 = cx + x1, cy + y1
+                abs_x2, abs_y2 = cx + x2, cy + y2
 
                 need_retract = True
                 if last_end is not None:
-                    dist = math.hypot(abs_x1 - last_end[0], abs_y1 - last_end[1])
-                    if dist < 0.3:
+                    if math.hypot(abs_x1 - last_end[0], abs_y1 - last_end[1]) < 0.3:
                         need_retract = False
 
                 if need_retract:
@@ -477,15 +463,12 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
                     f.write(f"G1 X{abs_x1:.3f} Y{abs_y1:.3f} F{ENGRAVE_FEED}\n")
 
                 f.write(f"G1 X{abs_x2:.3f} Y{abs_y2:.3f} F{ENGRAVE_FEED}\n")
-
                 last_end = (abs_x2, abs_y2)
                 first = False
 
             f.write(f"G0 Z{SAFE_Z:.3f}\n\n")
-
         f.write("M5\nG0 Z10\nG0 X0 Y0\nM30\n")
-
-    print(f"✅ Numéros     : {engrave_filename}")
+    print(f"✅ Numéros     : {base_filename}_numbers.nc")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
@@ -500,7 +483,7 @@ if __name__ == "__main__":
             WIDTH_MODULES = int(w_str)
             HEIGHT_MODULES = int(h_str)
         except Exception:
-            print("Format attendu : 8x12:4")
+            print("Format attendu : 10x15:6")
             sys.exit(1)
 
     print(f"Paramètres : {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}")
@@ -509,7 +492,6 @@ if __name__ == "__main__":
     random.seed()
     grid, pieces = try_fill_greedy()
 
-    from collections import Counter
     sizes = [len(c) for c in pieces.values()]
     print("\nRépartition des tailles :")
     for s, cnt in sorted(Counter(sizes).items()):
