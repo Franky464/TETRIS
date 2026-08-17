@@ -576,11 +576,31 @@ if __name__ == "__main__":
         for x, y in cells:
             type_grid[y][x] = tid
 
-    # Affichage de la répartition des tailles
-    sizes = [len(c) for c in pieces.values()]
-    print("\nRépartition des tailles :")
-    for s, cnt in sorted(Counter(sizes).items()):
-        print(f"  {s} modules : {cnt} pièce(s)")
+    # Affichage détaillé des formes identiques par taille
+    print("\nRépartition des formes identiques par taille :")
+
+    # On regroupe : taille → (type → nombre d'occurrences)
+    from collections import defaultdict
+    size_to_types = defaultdict(lambda: defaultdict(int))
+
+    for pid, cells in pieces.items():
+        size = len(cells)
+        min_x = min(c[0] for c in cells)
+        min_y = min(c[1] for c in cells)
+        shape = sorted([(x - min_x, y - min_y) for x, y in cells])
+        norm = normalize_shape(shape)
+        tid = shape_to_type.get(norm, 0)
+
+        size_to_types[size][tid] += 1
+
+    for size in sorted(size_to_types.keys()):
+        print(f"\n  {size} modules :")
+        types = size_to_types[size]
+        for tid, count in sorted(types.items(), key=lambda x: -x[1]):
+            if count == 1:
+                print(f"    Type {tid:2d} : 1 pièce")
+            else:
+                print(f"    Type {tid:2d} : {count} pièces identiques")
 
     # ========== Affichage coloré correct (aucune adjacence de même couleur) ==========
     print("\nGrille (numéro de TYPE de pièce) :")
