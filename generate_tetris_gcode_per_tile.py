@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Générateur de G-code Tetris bois
-- Découpe + Vcarve + Gravure des numéros
+Générateur de G-code pour jeu type Tetris en bois (CNC)
+
+Fonctionnalités :
+- Remplissage aléatoire d'une plaque avec des polyominoes
 - Réduction des doublons de formes
-- Choix Avalant / Opposition
+- Génération de 3 fichiers G-code :
+    1. Découpe (avec offset)
+    2. Vcarve / chanfrein
+    3. Gravure des numéros de pièces
+- Choix du mode d'usinage : Avalant ou Opposition
 
 Usage :
     python generate_tetris_gcode.py 8x12:4
@@ -17,39 +23,48 @@ import sys
 from typing import List, Tuple, Dict, Optional
 from collections import defaultdict, Counter
 
-# ====================== PARAMÈTRES ======================
-MODULE = 12.0
-WIDTH_MODULES = 8
-HEIGHT_MODULES = 12
-MAX_SIZE = 4
+# =============================================================================
+#                              PARAMÈTRES
+# =============================================================================
 
-THICKNESS = 3.5
-PASS_DEPTH = 0.5
-SAFE_Z = 5.0
-FEED_RATE = 1000
-PLUNGE_RATE = 100
-SPINDLE_SPEED = 18000
+MODULE = 12.0                  # Taille d'un module en mm
+WIDTH_MODULES = 8              # Largeur de la plaque (en modules)
+HEIGHT_MODULES = 12            # Hauteur de la plaque (en modules)
+MAX_SIZE = 4                   # Taille maximale d'une pièce
 
-MIN_SIZE = 2
-OFFSET = 0.5
-VCARVE_OFFSET = 1.0
-VCARVE_DEPTH = -1.0
+THICKNESS = 3.5                # Épaisseur de la plaque (mm)
+PASS_DEPTH = 0.5               # Profondeur de chaque passe de découpe
+SAFE_Z = 5.0                   # Hauteur de sécurité
+FEED_RATE = 1000               # Vitesse d'avance (mm/min)
+PLUNGE_RATE = 100              # Vitesse de plongée
+SPINDLE_SPEED = 18000          # Vitesse de rotation de la broche
+
+MIN_SIZE = 2                   # Taille minimale des pièces
+OFFSET = 0.5                   # Offset intérieur pour la découpe (jeu entre pièces)
+VCARVE_OFFSET = 1.0            # Offset pour le parcours Vcarve
+VCARVE_DEPTH = -1.0            # Profondeur du Vcarve
 
 # Direction d'usinage
-CLIMB_MILLING = False   # False = Opposition | True = Avalant
+CLIMB_MILLING = False          # False = Opposition (sens trigo)
+                               # True  = Avalant (sens horaire)
 
 # Gravure des numéros
-ENGRAVE_DEPTH = -0.5
-ENGRAVE_HEIGHT = 3.0
-ENGRAVE_FEED = 600
-# ========================================================
+ENGRAVE_DEPTH = -0.5           # Profondeur de gravure des chiffres
+ENGRAVE_HEIGHT = 3.0           # Hauteur des chiffres (mm)
+ENGRAVE_FEED = 600             # Vitesse de gravure
+
+# =============================================================================
+#                         TYPES ET UTILITAIRES GRILLE
+# =============================================================================
 
 Grid = List[List[int]]
 
 def create_empty_grid(w: int, h: int) -> Grid:
+    """Crée une grille vide de largeur w et hauteur h"""
     return [[0 for _ in range(w)] for _ in range(h)]
 
 def can_place(grid: Grid, shape: List[Tuple[int, int]], x: int, y: int) -> bool:
+    """Vérifie si une forme peut être placée à la position (x, y)"""
     h, w = len(grid), len(grid[0])
     for dx, dy in shape:
         nx, ny = x + dx, y + dy
@@ -58,10 +73,12 @@ def can_place(grid: Grid, shape: List[Tuple[int, int]], x: int, y: int) -> bool:
     return True
 
 def place(grid: Grid, shape: List[Tuple[int, int]], x: int, y: int, pid: int):
+    """Place une forme sur la grille avec l'identifiant pid"""
     for dx, dy in shape:
         grid[y + dy][x + dx] = pid
 
 def find_next_empty(grid: Grid) -> Optional[Tuple[int, int]]:
+    """Retourne la première case vide trouvée (parcours de haut en bas, gauche à droite)"""
     h, w = len(grid), len(grid[0])
     for y in range(h):
         for x in range(w):
@@ -69,7 +86,15 @@ def find_next_empty(grid: Grid) -> Optional[Tuple[int, int]]:
                 return (x, y)
     return None
 
+# =============================================================================
+#                         GÉNÉRATION DES POLYOMINOES
+# =============================================================================
+
 def generate_polyomino_in_free_space(grid: Grid, start: Tuple[int, int], size: int):
+    """
+    Génère un polyomino de 'size' cases en partant de 'start'
+    et en ne poussant que dans les cases encore libres.
+    """
     h, w = len(grid), len(grid[0])
     sx, sy = start
     if grid[sy][sx] != 0:
@@ -79,14 +104,16 @@ def generate_polyomino_in_free_space(grid: Grid, start: Tuple[int, int], size: i
     while len(cells) < size:
         candidates = []
         for cx, cy in cells:
-            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+            for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
                 nx, ny = cx + dx, cy + dy
-                if (0 <= nx < w and 0 <= ny < h and grid[ny][nx] == 0 and (nx, ny) not in cells):
+                if (0 <= nx < w and 0 <= ny < h and
+                    grid[ny][nx] == 0 and (nx, ny) not in cells):
                     candidates.append((nx, ny))
         if not candidates:
             return None
         cells.add(random.choice(candidates))
 
+    # Normalisation de la forme (coin supérieur gauche à 0,0)
     min_x = min(c[0] for c in cells)
     min_y = min(c[1] for c in cells)
     shape = sorted([(x - min_x, y - min_y) for x, y in cells])
@@ -94,7 +121,10 @@ def generate_polyomino_in_free_space(grid: Grid, start: Tuple[int, int], size: i
     return shape, origin
 
 def normalize_shape(shape: List[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]:
-    """Retourne une version canonique de la forme (toutes rotations)"""
+    """
+    Retourne une version canonique de la forme en testant toutes les rotations.
+    Permet de détecter les doublons (même forme, orientation différente).
+    """
     def get_rotations(s):
         rotations = []
         current = list(s)
@@ -103,14 +133,22 @@ def normalize_shape(shape: List[Tuple[int, int]]) -> Tuple[Tuple[int, int], ...]
             miny = min(p[1] for p in current)
             normalized = tuple(sorted((x - minx, y - miny) for x, y in current))
             rotations.append(normalized)
-            # Rotation 90° horaire
+            # Rotation 90°
             current = [(y, -x) for x, y in current]
         return rotations
 
     all_rots = get_rotations(shape)
-    return min(all_rots)
+    return min(all_rots)  # On prend la version "la plus petite" lexicographiquement
 
-def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, List[Tuple[int, int]]]]:
+# =============================================================================
+#                         ALGORITHME DE REMPLISSAGE
+# =============================================================================
+
+def try_fill_greedy(max_attempts_per_cell: int = 200):
+    """
+    Algorithme glouton de remplissage avec réduction des doublons.
+    Retourne : grille, dictionnaire des pièces, mapping forme → type
+    """
     w, h = WIDTH_MODULES, HEIGHT_MODULES
     total = w * h
 
@@ -120,7 +158,7 @@ def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, L
         pieces = {}
         pid = 1
         cells_filled = 0
-        shape_usage = Counter()
+        shape_usage = Counter()          # Compteur d'utilisation des formes
 
         while cells_filled < total:
             pos = find_next_empty(grid)
@@ -136,6 +174,7 @@ def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, L
             best_candidate = None
             best_score = float('inf')
 
+            # Recherche de la meilleure pièce (celle avec le moins de doublons)
             if max_possible >= MIN_SIZE:
                 for _ in range(max_attempts_per_cell):
                     size = random.randint(MIN_SIZE, max_possible)
@@ -148,15 +187,16 @@ def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, L
                         continue
 
                     norm = normalize_shape(shape)
-                    score = shape_usage[norm]
+                    score = shape_usage[norm]   # 0 = jamais vue
 
                     if score < best_score:
                         best_score = score
                         best_candidate = (shape, ox, oy, size, norm)
 
-                    if score == 0:  # Forme jamais vue → on prend
+                    if score == 0:  # Forme inédite → on la prend tout de suite
                         break
 
+            # Placement du meilleur candidat
             if best_candidate is not None:
                 shape, ox, oy, size, norm = best_candidate
                 place(grid, shape, ox, oy, pid)
@@ -166,7 +206,7 @@ def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, L
                 pid += 1
                 placed = True
 
-            # Dernier recours : pièce de 1 module
+            # Dernier recours : pièce d'un seul module
             if not placed:
                 x, y = pos
                 place(grid, [(0, 0)], x, y, pid)
@@ -184,16 +224,30 @@ def try_fill_greedy(max_attempts_per_cell: int = 200) -> Tuple[Grid, Dict[int, L
             unique = len(shape_usage)
             duplicates = sum(1 for v in shape_usage.values() if v > 1)
             print(f"   Formes uniques : {unique} | Formes en double ou plus : {duplicates}")
-            return grid, pieces
+
+            # Création du mapping forme normalisée → numéro de type
+            shape_to_type = {}
+            type_id = 1
+            for norm in shape_usage:
+                shape_to_type[norm] = type_id
+                type_id += 1
+
+            return grid, pieces, shape_to_type
 
     raise RuntimeError("Impossible de remplir la grille.")
 
+# =============================================================================
+#                         CONTOURS ET OFFSET
+# =============================================================================
+
 def get_perfect_contour(cells: List[Tuple[int, int]]) -> List[Tuple[float, float]]:
+    """Extrait le contour extérieur parfait d'une pièce (suivi de bordure)"""
     if not cells:
         return []
 
     cell_set = set(cells)
     edges = []
+
     for x, y in cells:
         if (x, y - 1) not in cell_set:
             edges.append(((x, y), (x + 1, y)))
@@ -233,6 +287,7 @@ def get_perfect_contour(cells: List[Tuple[int, int]]) -> List[Tuple[float, float
 
     points = [(x * MODULE, y * MODULE) for x, y in contour]
 
+    # Suppression des points colinéaires
     cleaned = []
     for i, p in enumerate(points):
         if i == 0 or i == len(points) - 1:
@@ -248,6 +303,7 @@ def get_perfect_contour(cells: List[Tuple[int, int]]) -> List[Tuple[float, float
     return cleaned
 
 def offset_contour_inward(contour: List[Tuple[float, float]], offset: float) -> List[Tuple[float, float]]:
+    """Décale un contour rectiligne vers l'intérieur de 'offset' mm"""
     if len(contour) < 4 or offset <= 0:
         return contour
 
@@ -265,10 +321,11 @@ def offset_contour_inward(contour: List[Tuple[float, float]], offset: float) -> 
         dx2 = x2 - x1
         dy2 = y2 - y1
 
-        if abs(dx1) > abs(dy1):
+        # Calcul des normales intérieures
+        if abs(dx1) > abs(dy1):          # Segment horizontal
             nx1 = 0
             ny1 = 1 if dx1 > 0 else -1
-        else:
+        else:                            # Segment vertical
             nx1 = -1 if dy1 > 0 else 1
             ny1 = 0
 
@@ -295,6 +352,7 @@ def offset_contour_inward(contour: List[Tuple[float, float]], offset: float) -> 
     return new_pts
 
 def reverse_contour(contour: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Inverse le sens d'un contour (pour passer en mode Avalant)"""
     if len(contour) < 3:
         return contour
     if contour[0] == contour[-1]:
@@ -305,7 +363,10 @@ def reverse_contour(contour: List[Tuple[float, float]]) -> List[Tuple[float, flo
     reversed_pts.append(reversed_pts[0])
     return reversed_pts
 
-# ====================== POLICE BÂTON ======================
+# =============================================================================
+#                         POLICE BÂTON POUR LES NUMÉROS
+# =============================================================================
+
 DIGIT_STROKES = {
     '0': [(0.2,0.1, 0.8,0.1), (0.8,0.1, 0.8,0.9), (0.8,0.9, 0.2,0.9), (0.2,0.9, 0.2,0.1)],
     '1': [(0.5,0.1, 0.5,0.9), (0.3,0.75, 0.5,0.9)],
@@ -320,13 +381,14 @@ DIGIT_STROKES = {
 }
 
 def get_number_strokes(number: int, height: float) -> List[List[Tuple[float, float]]]:
+    """Génère les segments de traits pour un numéro donné"""
     text = str(number)
     digit_width = height * 0.7
     spacing = height * 0.15
     total_width = len(text) * digit_width + (len(text) - 1) * spacing
 
     strokes = []
-    x_offset = -total_width / 2
+    x_offset = -total_width / 2  # Centré
 
     for char in text:
         if char not in DIGIT_STROKES:
@@ -340,7 +402,12 @@ def get_number_strokes(number: int, height: float) -> List[List[Tuple[float, flo
         x_offset += digit_width + spacing
     return strokes
 
+# =============================================================================
+#                         GÉNÉRATION DES G-CODE
+# =============================================================================
+
 def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str):
+    """Génère les 3 fichiers G-code : découpe, vcarve et numéros"""
     num_passes = math.ceil(THICKNESS / PASS_DEPTH)
 
     contours_cut = {}
@@ -365,6 +432,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
                 all_x.append(x)
                 all_y.append(y)
 
+        # Position de gravure = centre de la case la plus en bas à droite
         best = max(cells, key=lambda c: (c[0], -c[1]))
         cx = (best[0] + 0.5) * MODULE
         cy = (best[1] + 0.5) * MODULE
@@ -379,7 +447,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
 
     mode_str = "Avalant (climb)" if CLIMB_MILLING else "Opposition (conventional)"
 
-    # ----- 1. Découpe -----
+    # ----- Fichier 1 : Découpe -----
     with open(f"{base_filename}.nc", "w", encoding="utf-8") as f:
         f.write("; =============================================\n")
         f.write("; G-code Tetris bois - Découpe\n")
@@ -406,7 +474,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
         f.write("M5\nG0 Z10\nG0 X0 Y0\nM30\n")
     print(f"✅ Découpe     : {base_filename}.nc")
 
-    # ----- 2. Vcarve -----
+    # ----- Fichier 2 : Vcarve -----
     with open(f"{base_filename}_vcarve.nc", "w", encoding="utf-8") as f:
         f.write("; =============================================\n")
         f.write("; G-code Tetris bois - Vcarve\n")
@@ -427,7 +495,7 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
         f.write("\nM5\nG0 Z10\nG0 X0 Y0\nM30\n")
     print(f"✅ Vcarve      : {base_filename}_vcarve.nc")
 
-    # ----- 3. Numéros -----
+    # ----- Fichier 3 : Gravure des numéros -----
     with open(f"{base_filename}_numbers.nc", "w", encoding="utf-8") as f:
         f.write("; =============================================\n")
         f.write("; G-code Tetris bois - Gravure des numéros\n")
@@ -470,7 +538,12 @@ def generate_gcode(pieces: Dict[int, List[Tuple[int, int]]], base_filename: str)
         f.write("M5\nG0 Z10\nG0 X0 Y0\nM30\n")
     print(f"✅ Numéros     : {base_filename}_numbers.nc")
 
+# =============================================================================
+#                                  MAIN
+# =============================================================================
+
 if __name__ == "__main__":
+    # Lecture des arguments (ex: 10x15:6)
     if len(sys.argv) > 1:
         try:
             arg = sys.argv[1].lower().replace(" ", "")
@@ -490,16 +563,107 @@ if __name__ == "__main__":
     print(f"Mode d'usinage : {'Avalant (climb)' if CLIMB_MILLING else 'Opposition (conventional)'}")
 
     random.seed()
-    grid, pieces = try_fill_greedy()
+    grid, pieces, shape_to_type = try_fill_greedy()
 
+    # Construction de la grille des types
+    type_grid = create_empty_grid(WIDTH_MODULES, HEIGHT_MODULES)
+    for pid, cells in pieces.items():
+        min_x = min(c[0] for c in cells)
+        min_y = min(c[1] for c in cells)
+        shape = sorted([(x - min_x, y - min_y) for x, y in cells])
+        norm = normalize_shape(shape)
+        tid = shape_to_type.get(norm, 0)
+        for x, y in cells:
+            type_grid[y][x] = tid
+
+    # Affichage de la répartition des tailles
     sizes = [len(c) for c in pieces.values()]
     print("\nRépartition des tailles :")
     for s, cnt in sorted(Counter(sizes).items()):
         print(f"  {s} modules : {cnt} pièce(s)")
 
-    base = f"tetris_{WIDTH_MODULES}x{HEIGHT_MODULES}_max{MAX_SIZE}"
-    generate_gcode(pieces, base)
+    # ========== Affichage coloré correct (aucune adjacence de même couleur) ==========
+    print("\nGrille (numéro de TYPE de pièce) :")
 
-    print("\nGrille :")
-    for row in grid:
-        print(" ".join(f"{c:2}" for c in row))
+    # Grande palette de couleurs vives (sans noir)
+    COLORS = [
+        "\033[48;5;27m",   # Bleu
+        "\033[48;5;34m",   # Vert
+        "\033[48;5;208m",  # Orange
+        "\033[48;5;165m",  # Magenta
+        "\033[48;5;39m",   # Cyan
+        "\033[48;5;220m",  # Jaune
+        "\033[48;5;160m",  # Rouge
+        "\033[48;5;99m",   # Violet
+        "\033[48;5;70m",   # Vert clair
+        "\033[48;5;202m",  # Orange foncé
+        "\033[48;5;45m",   # Turquoise
+        "\033[48;5;198m",  # Rose
+    ]
+    RESET = "\033[0m"
+    WHITE = "\033[97m"
+
+    # 1. Construire le graphe d'adjacence (pièces qui se touchent)
+    from collections import defaultdict
+    adjacency = defaultdict(set)
+
+    h, w = HEIGHT_MODULES, WIDTH_MODULES
+    for y in range(h):
+        for x in range(w):
+            pid = grid[y][x]
+            # On regarde les 4 directions
+            for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h:
+                    nid = grid[ny][nx]
+                    if nid != pid and nid != 0:
+                        adjacency[pid].add(nid)
+
+    # 2. Coloriage glouton (utilise le minimum de couleurs nécessaires)
+    piece_color = {}
+
+    for pid in sorted(pieces.keys()):
+        # Couleurs déjà utilisées par les voisins
+        used_colors = {piece_color[neigh] for neigh in adjacency[pid] if neigh in piece_color}
+        
+        # On prend la plus petite couleur disponible
+        color = 0
+        while color in used_colors:
+            color += 1
+        piece_color[pid] = color
+
+    def colored(pid: int, val: int) -> str:
+        if val == 0:
+            return f"{'':^3}"
+        color_idx = piece_color.get(pid, 0) % len(COLORS)
+        color = COLORS[color_idx]
+        return f"{color}{WHITE}{val:^3}{RESET}"
+
+    # 3. Affichage
+    print("┌" + "───┬" * (WIDTH_MODULES - 1) + "───┐")
+
+    rows = list(reversed(range(HEIGHT_MODULES)))
+    for i, y in enumerate(rows):
+        line = "│"
+        for x in range(WIDTH_MODULES):
+            pid = grid[y][x]
+
+            # Récupération du numéro de type
+            cells = pieces[pid]
+            min_x = min(c[0] for c in cells)
+            min_y = min(c[1] for c in cells)
+            shape = sorted([(a - min_x, b - min_y) for a, b in cells])
+            norm = normalize_shape(shape)
+            tid = shape_to_type.get(norm, 0)
+
+            line += colored(pid, tid) + "│"
+        print(line)
+
+        if i < len(rows) - 1:
+            print("├" + "───┼" * (WIDTH_MODULES - 1) + "───┤")
+
+    print("└" + "───┴" * (WIDTH_MODULES - 1) + "───┘")
+
+    # Affichage du nombre de couleurs utilisées
+    nb_colors = len(set(piece_color.values()))
+    print(f"\nNombre de couleurs utilisées : {nb_colors}")
