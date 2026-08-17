@@ -232,6 +232,10 @@ def try_fill_greedy(max_attempts_per_cell: int = 200):
                 shape_to_type[norm] = type_id
                 type_id += 1
 
+                # Génération des fichiers G-code
+                base = f"tetris_{WIDTH_MODULES}x{HEIGHT_MODULES}_max{MAX_SIZE}"
+                generate_gcode(pieces, base)
+
             return grid, pieces, shape_to_type
 
     raise RuntimeError("Impossible de remplir la grille.")
