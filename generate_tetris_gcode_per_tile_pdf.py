@@ -615,7 +615,7 @@ def generate_pdf(grid, pieces, shape_to_type, piece_color, filename: str):
                     color='white', fontweight='bold')
 
     # Titre
-    ax.set_title(f"Tetris {WIDTH_MODULES}×{HEIGHT_MODULES}  |  MAX_SIZE={MAX_SIZE}",
+    ax.set_title(f"Tetris {WIDTH_MODULES}×{HEIGHT_MODULES}  |  MAX_SIZE={MAX_SIZE} modules",
                  fontsize=8, pad=10)
 
     # Sauvegarde en PDF
