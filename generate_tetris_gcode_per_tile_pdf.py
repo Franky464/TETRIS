@@ -30,31 +30,55 @@ from matplotlib.backends.backend_pdf import PdfPages
 #                              PARAMÈTRES
 # =============================================================================
 
-MODULE = 12.0                  # Taille d'un module en mm
-WIDTH_MODULES = 8              # Largeur de la plaque (en modules)
-HEIGHT_MODULES = 12            # Hauteur de la plaque (en modules)
-MAX_SIZE = 4                   # Taille maximale d'une pièce
+MODULE = 12.0                  # Taille d'un module en mm (sera recalculé si FIXED_PLATE = True)
+WIDTH_MODULES = 8
+HEIGHT_MODULES = 12
+MAX_SIZE = 4
 
-THICKNESS = 3.5                # Épaisseur de la plaque (mm)
-PASS_DEPTH = 0.5               # Profondeur de chaque passe de découpe
-SAFE_Z = 5.0                   # Hauteur de sécurité
-FEED_RATE = 1000               # Vitesse d'avance (mm/min)
-PLUNGE_RATE = 100              # Vitesse de plongée
-SPINDLE_SPEED = 18000          # Vitesse de rotation de la broche
+# --- Nouvelle option ---
+FIXED_PLATE = True             # True  = plaque toujours 180 x 240 mm (MODULE adapté)
+                               # False = utilise MODULE fixe ci-dessus
+PLATE_WIDTH_MM  = 200.0        # Largeur physique cible (mm)
+PLATE_HEIGHT_MM = 280.0        # Hauteur physique cible (mm)
 
-MIN_SIZE = 2                   # Taille minimale des pièces
-OFFSET = 0.5                   # Offset intérieur pour la découpe (jeu entre pièces)
-VCARVE_OFFSET = 1.0            # Offset pour le parcours Vcarve
-VCARVE_DEPTH = -1.0            # Profondeur du Vcarve
+THICKNESS = 6
+PASS_DEPTH = 1
+SAFE_Z = 5.0
+FEED_RATE = 1000
+PLUNGE_RATE = 100
+SPINDLE_SPEED = 18000
 
-# Direction d'usinage
-CLIMB_MILLING = False          # False = Opposition (sens trigo)
-                               # True  = Avalant (sens horaire)
+MIN_SIZE = 2
+OFFSET = 0.5
+VCARVE_OFFSET = 1.0
+VCARVE_DEPTH = -1.0
 
-# Gravure des numéros
-ENGRAVE_DEPTH = -0.5           # Profondeur de gravure des chiffres
-ENGRAVE_HEIGHT = 3.0           # Hauteur des chiffres (mm)
-ENGRAVE_FEED = 600             # Vitesse de gravure
+CLIMB_MILLING = False
+
+ENGRAVE_DEPTH = -0.5
+ENGRAVE_HEIGHT = 3.0           # sera aussi adapté proportionnellement si FIXED_PLATE
+ENGRAVE_FEED = 600
+
+def compute_module_size():
+    """Calcule MODULE pour que la plaque fasse exactement PLATE_WIDTH_MM x PLATE_HEIGHT_MM"""
+    global MODULE, ENGRAVE_HEIGHT
+
+    if not FIXED_PLATE:
+        return
+
+    # On prend le plus petit ratio pour que tout rentre dans 180x240
+    # (les modules restent carrés)
+    module_w = PLATE_WIDTH_MM  / WIDTH_MODULES
+    module_h = PLATE_HEIGHT_MM / HEIGHT_MODULES
+    MODULE = min(module_w, module_h)
+
+    # On adapte aussi la hauteur des chiffres proportionnellement
+    # (base = 3 mm pour un module de 12 mm)
+    ENGRAVE_HEIGHT = 3.0 * (MODULE / 12.0)
+
+    print(f"→ FIXED_PLATE activé : MODULE calculé = {MODULE:.3f} mm")
+    print(f"  Taille réelle de la plaque : {WIDTH_MODULES * MODULE:.1f} x {HEIGHT_MODULES * MODULE:.1f} mm")
+    print(f"  Hauteur des numéros adaptée : {ENGRAVE_HEIGHT:.2f} mm")
 
 # =============================================================================
 #                         TYPES ET UTILITAIRES GRILLE
@@ -645,8 +669,12 @@ if __name__ == "__main__":
             print("Format attendu : 10x15:6")
             sys.exit(1)
 
+    # >>> Ajoute cette ligne ici <<<
+    compute_module_size()
+
     print(f"Paramètres : {WIDTH_MODULES}x{HEIGHT_MODULES} | MAX_SIZE={MAX_SIZE}")
     print(f"Mode d'usinage : {'Avalant (climb)' if CLIMB_MILLING else 'Opposition (conventional)'}")
+    
 
     random.seed()
     grid, pieces, shape_to_type = try_fill_greedy()
